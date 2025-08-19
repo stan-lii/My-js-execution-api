@@ -35,18 +35,55 @@ app.use('/api/', (req, res, next) => {
         req.body = JSON.parse(cleanedBody);
         console.log('Successfully parsed cleaned JSON');
       } catch (secondError) {
-        console.error('JSON parsing failed even after cleaning:', secondError);
-        return res.status(400).json({
-          error: 'Invalid JSON',
-          message: 'Request body contains invalid JSON format',
-          details: secondError.message,
-          timestamp: new Date().toISOString()
-        });
+        try {
+          // Last resort: try to fix common JSON issues
+          console.log('Attempting advanced JSON repair...');
+          let repairedBody = req.body
+            .replace(/\r\n/g, ' ')
+            .replace(/\r/g, ' ')
+            .replace(/\n/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          
+          // Try to find and fix specific JSON syntax issues
+          // Look for the position mentioned in the error (around position 904)
+          if (secondError.message.includes('position')) {
+            const match = secondError.message.match(/position (\d+)/);
+            if (match) {
+              const pos = parseInt(match[1]);
+              console.log(`Attempting to fix JSON around position ${pos}`);
+              
+              // Show context around the error
+              const start = Math.max(0, pos - 50);
+              const end = Math.min(repairedBody.length, pos + 50);
+              console.log('Context:', repairedBody.substring(start, end));
+            }
+          }
+          
+          req.body = JSON.parse(repairedBody);
+          console.log('Successfully parsed with advanced repair');
+        } catch (thirdError) {
+          console.error('All JSON parsing attempts failed:', thirdError);
+          console.log('Raw body length:', req.body.length);
+          console.log('First 200 chars:', req.body.substring(0, 200));
+          console.log('Last 200 chars:', req.body.substring(req.body.length - 200));
+          
+          return res.status(400).json({
+            error: 'Invalid JSON',
+            message: 'Request body contains invalid JSON format that cannot be automatically repaired',
+            details: thirdError.message,
+            suggestion: 'Try using simpler JavaScript syntax or contact support',
+            timestamp: new Date().toISOString()
+          });
+        }
       }
     }
   }
   next();
 });
+
+// Standard JSON parser for other routes
+app.use(express.json({ limit: '1mb' }));
 
 // Standard JSON parser for other routes
 app.use(express.json({ limit: '1mb' }));
