@@ -181,165 +181,247 @@ app.get('/health', (req, res) => {
   });
 });
 
-// JavaScript execution endpoint
-app.post('/api/execute', authenticateApiKey, async (req, res) => {
+// Form-encoded endpoint for Make.com compatibility
+app.post('/api/execute-form', authenticateApiKey, express.urlencoded({ extended: true }), async (req, res) => {
   try {
-    const { code, timeout = 5000, context = {} } = req.body;
+    const { code, timeout = 5000, input_data } = req.body;
     
-    console.log('=== EXECUTION REQUEST ===');
+    console.log('=== FORM EXECUTION REQUEST ===');
     console.log('Code length:', code ? code.length : 0);
-    console.log('Timeout:', timeout);
-    console.log('Context keys:', Object.keys(context));
-    console.log('Context content:', JSON.stringify(context, null, 2));
+    console.log('Input data:', input_data ? 'provided' : 'none');
+    
+    // Parse input data if provided
+    let context = {};
+    if (input_data) {
+      try {
+        context.input = JSON.parse(input_data);
+        console.log('Input data parsed successfully from form');
+      } catch (parseError) {
+        console.log('Input data parsing failed:', parseError.message);
+        context.input = input_data; // Use as string if JSON parsing fails
+      }
+    }
+    
+    return executeJavaScript(code, parseInt(timeout), context, res);
+    
+  } catch (error) {
+    console.error('Form API Error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'An unexpected error occurred',
+      details: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Query parameter endpoint for Make.com compatibility
+app.get('/api/execute-query', authenticateApiKey, async (req, res) => {
+  try {
+    const { code, timeout = 5000, input_data } = req.query;
+    
+    console.log('=== QUERY EXECUTION REQUEST ===');
+    console.log('Code length:', code ? code.length : 0);
+    console.log('Input data:', input_data ? 'provided' : 'none');
     
     if (!code) {
       return res.status(400).json({
         error: 'Missing code parameter',
-        message: 'Please provide JavaScript code to execute'
+        message: 'Please provide JavaScript code in the "code" query parameter'
       });
     }
     
-    if (typeof code !== 'string') {
-      return res.status(400).json({
-        error: 'Invalid code parameter',
-        message: 'Code must be a string'
-      });
+    // Parse input data if provided
+    let context = {};
+    if (input_data) {
+      try {
+        context.input = JSON.parse(decodeURIComponent(input_data));
+        console.log('Input data parsed successfully');
+      } catch (parseError) {
+        console.log('Input data parsing failed:', parseError.message);
+        context.input = input_data; // Use as string if JSON parsing fails
+      }
     }
     
-    if (code.length > 10000) {
-      return res.status(400).json({
-        error: 'Code too long',
-        message: 'Code must be less than 10,000 characters'
-      });
-    }
+    // Decode the code (in case it's URL encoded)
+    const decodedCode = decodeURIComponent(code);
     
-    // Clean up line breaks - normalize all line breaks to \n
-    const cleanCode = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    return executeJavaScript(decodedCode, parseInt(timeout), context, res);
     
-    // Create a secure sandbox
-    const vm = new NodeVM({
-      console: 'redirect',
-      sandbox: context,
-      timeout: Math.min(timeout, 10000), // Max 10 seconds
-      allowAsync: false,
-      wrapper: 'none',
-      strict: true
+  } catch (error) {
+    console.error('Query API Error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'An unexpected error occurred',
+      details: error.message,
+      timestamp: new Date().toISOString()
     });
-    
-    let output = [];
-    let errors = [];
-    
-    // Capture console output
-    vm.on('console.log', (...args) => {
-      const message = args.map(arg => {
-        if (typeof arg === 'object') {
-          try {
-            return JSON.stringify(arg);
-          } catch {
-            return String(arg);
-          }
+  }
+});
+
+// JavaScript execution endpoint
+app.post('/api/execute', authenticateApiKey, async (req, res) => {
+// Common JavaScript execution function
+async function executeJavaScript(code, timeout = 5000, context = {}, res) {
+  console.log('=== EXECUTION REQUEST ===');
+  console.log('Code length:', code ? code.length : 0);
+  console.log('Timeout:', timeout);
+  console.log('Context keys:', Object.keys(context));
+  
+  if (!code) {
+    return res.status(400).json({
+      error: 'Missing code parameter',
+      message: 'Please provide JavaScript code to execute'
+    });
+  }
+  
+  if (typeof code !== 'string') {
+    return res.status(400).json({
+      error: 'Invalid code parameter',
+      message: 'Code must be a string'
+    });
+  }
+  
+  if (code.length > 10000) {
+    return res.status(400).json({
+      error: 'Code too long',
+      message: 'Code must be less than 10,000 characters'
+    });
+  }
+  
+  // Clean up line breaks - normalize all line breaks to \n
+  const cleanCode = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  
+  // Create a secure sandbox
+  const vm = new NodeVM({
+    console: 'redirect',
+    sandbox: context,
+    timeout: Math.min(timeout, 10000), // Max 10 seconds
+    allowAsync: false,
+    wrapper: 'none',
+    strict: true
+  });
+  
+  let output = [];
+  let errors = [];
+  
+  // Capture console output
+  vm.on('console.log', (...args) => {
+    const message = args.map(arg => {
+      if (typeof arg === 'object') {
+        try {
+          return JSON.stringify(arg);
+        } catch {
+          return String(arg);
         }
-        return String(arg);
-      }).join(' ');
-      output.push({ type: 'log', message });
-    });
+      }
+      return String(arg);
+    }).join(' ');
+    output.push({ type: 'log', message });
+  });
+  
+  vm.on('console.error', (...args) => {
+    const message = args.map(arg => String(arg)).join(' ');
+    errors.push({ type: 'error', message });
+  });
+  
+  vm.on('console.warn', (...args) => {
+    const message = args.map(arg => String(arg)).join(' ');
+    output.push({ type: 'warn', message });
+  });
+  
+  const startTime = Date.now();
+  let result;
+  
+  try {
+    // Smart code execution that handles various cases
+    let executableCode = cleanCode.trim();
     
-    vm.on('console.error', (...args) => {
-      const message = args.map(arg => String(arg)).join(' ');
-      errors.push({ type: 'error', message });
-    });
-    
-    vm.on('console.warn', (...args) => {
-      const message = args.map(arg => String(arg)).join(' ');
-      output.push({ type: 'warn', message });
-    });
-    
-    const startTime = Date.now();
-    let result;
-    
-    try {
-      // Smart code execution that handles various cases
-      let executableCode = cleanCode.trim();
+    // If it's a simple expression (no semicolons, no statements), wrap it
+    if (!executableCode.includes(';') && !executableCode.includes('\n') && 
+        !executableCode.match(/^(var|let|const|if|for|while|function|console\.|{)/)) {
+      executableCode = `return (${executableCode});`;
+    } else {
+      // For multi-line code, intelligently determine how to execute it
       
-      // If it's a simple expression (no semicolons, no statements), wrap it
-      if (!executableCode.includes(';') && !executableCode.includes('\n') && 
-          !executableCode.match(/^(var|let|const|if|for|while|function|console\.|{)/)) {
-        executableCode = `return (${executableCode});`;
+      // First, try to detect if the code already has a return statement at the top level
+      const hasExplicitReturn = /^(?:(?!function)[\s\S])*?^[ \t]*return\s+/m.test(executableCode);
+      
+      if (hasExplicitReturn) {
+        // Code already has explicit return, execute as-is
+        // No modification needed
       } else {
-        // For multi-line code, intelligently determine how to execute it
+        // Try to identify what the last meaningful line is
+        const lines = executableCode.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('//'));
         
-        // First, try to detect if the code already has a return statement at the top level
-        const hasExplicitReturn = /^(?:(?!function)[\s\S])*?^[ \t]*return\s+/m.test(executableCode);
-        
-        if (hasExplicitReturn) {
-          // Code already has explicit return, execute as-is
-          // No modification needed
-        } else {
-          // Try to identify what the last meaningful line is
-          const lines = executableCode.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('//'));
+        if (lines.length > 0) {
+          const lastLine = lines[lines.length - 1];
           
-          if (lines.length > 0) {
-            const lastLine = lines[lines.length - 1];
+          // If last line is a variable reference, object literal, or simple expression
+          if (lastLine.match(/^[a-zA-Z_$][\w.$]*;?$/) ||           // variable or property access
+              lastLine.match(/^{[\s\S]*};?$/) ||                   // object literal
+              lastLine.match(/^\[[\s\S]*\];?$/) ||                 // array literal
+              lastLine.match(/^["'`][\s\S]*["'`];?$/) ||           // string literal
+              lastLine.match(/^\d+(\.\d+)?;?$/) ||                 // number literal
+              lastLine.match(/^(true|false|null|undefined);?$/)) { // boolean/null/undefined
             
-            // If last line is a variable reference, object literal, or simple expression
-            if (lastLine.match(/^[a-zA-Z_$][\w.$]*;?$/) ||           // variable or property access
-                lastLine.match(/^{[\s\S]*};?$/) ||                   // object literal
-                lastLine.match(/^\[[\s\S]*\];?$/) ||                 // array literal
-                lastLine.match(/^["'`][\s\S]*["'`];?$/) ||           // string literal
-                lastLine.match(/^\d+(\.\d+)?;?$/) ||                 // number literal
-                lastLine.match(/^(true|false|null|undefined);?$/)) { // boolean/null/undefined
-              
-              // Remove semicolon if present and add return
-              const cleanLastLine = lastLine.replace(/;$/, '');
-              const otherLines = lines.slice(0, -1);
-              executableCode = [...otherLines, `return (${cleanLastLine});`].join('\n');
-            } else {
-              // For complex expressions or statements, wrap everything in an IIFE
-              executableCode = `
-                (() => {
-                  ${executableCode}
-                })()
-              `;
-            }
+            // Remove semicolon if present and add return
+            const cleanLastLine = lastLine.replace(/;$/, '');
+            const otherLines = lines.slice(0, -1);
+            executableCode = [...otherLines, `return (${cleanLastLine});`].join('\n');
+          } else {
+            // For complex expressions or statements, wrap everything in an IIFE
+            executableCode = `
+              (() => {
+                ${executableCode}
+              })()
+            `;
           }
         }
       }
-      
-      result = vm.run(executableCode);
-    } catch (vmError) {
-      return res.status(400).json({
-        error: 'Execution error',
-        message: vmError.message,
-        output,
-        errors,
-        executionTime: Date.now() - startTime
-      });
     }
     
-    const executionTime = Date.now() - startTime;
-    
-    // Serialize the result safely
-    let serializedResult;
-    try {
-      serializedResult = JSON.parse(JSON.stringify(result));
-    } catch (serializationError) {
-      serializedResult = String(result);
-    }
-    
-    console.log('=== EXECUTION COMPLETE ===');
-    console.log('Execution time:', executionTime + 'ms');
-    console.log('Result type:', typeof result);
-    console.log('Output messages:', output.length);
-    
-    res.json({
-      success: true,
-      result: serializedResult,
+    result = vm.run(executableCode);
+  } catch (vmError) {
+    return res.status(400).json({
+      error: 'Execution error',
+      message: vmError.message,
       output,
       errors,
-      executionTime,
-      timestamp: new Date().toISOString()
+      executionTime: Date.now() - startTime
     });
-    
+  }
+  
+  const executionTime = Date.now() - startTime;
+  
+  // Serialize the result safely
+  let serializedResult;
+  try {
+    serializedResult = JSON.parse(JSON.stringify(result));
+  } catch (serializationError) {
+    serializedResult = String(result);
+  }
+  
+  console.log('=== EXECUTION COMPLETE ===');
+  console.log('Execution time:', executionTime + 'ms');
+  console.log('Result type:', typeof result);
+  console.log('Output messages:', output.length);
+  
+  res.json({
+    success: true,
+    result: serializedResult,
+    output,
+    errors,
+    executionTime,
+    timestamp: new Date().toISOString()
+  });
+}
+
+// JavaScript execution endpoint
+app.post('/api/execute', authenticateApiKey, async (req, res) => {
+  try {
+    const { code, timeout = 5000, context = {} } = req.body;
+    return executeJavaScript(code, timeout, context, res);
   } catch (error) {
     console.error('API Error:', error);
     res.status(500).json({
@@ -504,6 +586,8 @@ app.use('*', (req, res) => {
     availableEndpoints: [
       'GET /health',
       'POST /api/execute',
+      'GET /api/execute-query',
+      'POST /api/execute-form', 
       'POST /api/function',
       'GET /api/functions'
     ]
