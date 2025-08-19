@@ -171,23 +171,41 @@ app.post('/api/execute', authenticateApiKey, async (req, res) => {
           !executableCode.match(/^(var|let|const|if|for|while|function|console\.|{)/)) {
         executableCode = `return (${executableCode});`;
       } else {
-        // For multi-line code, wrap it in an IIFE and return the last expression
-        const lines = executableCode.split('\n').map(line => line.trim()).filter(line => line);
-        if (lines.length > 0) {
-          const lastLine = lines[lines.length - 1];
+        // For multi-line code, intelligently determine how to execute it
+        
+        // First, try to detect if the code already has a return statement at the top level
+        const hasExplicitReturn = /^(?:(?!function)[\s\S])*?^[ \t]*return\s+/m.test(executableCode);
+        
+        if (hasExplicitReturn) {
+          // Code already has explicit return, execute as-is
+          // No modification needed
+        } else {
+          // Try to identify what the last meaningful line is
+          const lines = executableCode.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('//'));
           
-          // If last line is an expression (no semicolon, not a statement), return it
-          if (!lastLine.endsWith(';') && 
-              !lastLine.match(/^(var|let|const|if|for|while|function|console\.|return|{|})/)) {
-            lines[lines.length - 1] = `return (${lastLine});`;
-            executableCode = lines.join('\n');
-          } else if (!executableCode.includes('return')) {
-            // Wrap everything in an IIFE to capture the result
-            executableCode = `
-              (() => {
-                ${executableCode}
-              })()
-            `;
+          if (lines.length > 0) {
+            const lastLine = lines[lines.length - 1];
+            
+            // If last line is a variable reference, object literal, or simple expression
+            if (lastLine.match(/^[a-zA-Z_$][\w.$]*;?$/) ||           // variable or property access
+                lastLine.match(/^{[\s\S]*};?$/) ||                   // object literal
+                lastLine.match(/^\[[\s\S]*\];?$/) ||                 // array literal
+                lastLine.match(/^["'`][\s\S]*["'`];?$/) ||           // string literal
+                lastLine.match(/^\d+(\.\d+)?;?$/) ||                 // number literal
+                lastLine.match(/^(true|false|null|undefined);?$/)) { // boolean/null/undefined
+              
+              // Remove semicolon if present and add return
+              const cleanLastLine = lastLine.replace(/;$/, '');
+              const otherLines = lines.slice(0, -1);
+              executableCode = [...otherLines, `return (${cleanLastLine});`].join('\n');
+            } else {
+              // For complex expressions or statements, wrap everything in an IIFE
+              executableCode = `
+                (() => {
+                  ${executableCode}
+                })()
+              `;
+            }
           }
         }
       }
