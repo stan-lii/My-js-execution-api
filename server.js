@@ -68,13 +68,31 @@ app.use('/api/', (req, res, next) => {
           console.log('First 200 chars:', req.body.substring(0, 200));
           console.log('Last 200 chars:', req.body.substring(req.body.length - 200));
           
-          return res.status(400).json({
-            error: 'Invalid JSON',
-            message: 'Request body contains invalid JSON format that cannot be automatically repaired',
-            details: thirdError.message,
-            suggestion: 'Try using simpler JavaScript syntax or contact support',
-            timestamp: new Date().toISOString()
-          });
+          // Try to extract just the code parameter as a fallback
+          try {
+            console.log('Attempting emergency code extraction...');
+            const codeMatch = req.body.match(/"code"\s*:\s*"([^"]*(?:\\.[^"]*)*)"/) || 
+                             req.body.match(/"code"\s*:\s*'([^']*(?:\\.[^']*)*)'/) ||
+                             req.body.match(/"code"\s*:\s*`([^`]*(?:\\.[^`]*)*)`/);
+            
+            if (codeMatch) {
+              console.log('Emergency extraction successful');
+              req.body = {
+                code: codeMatch[1].replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\"/g, '"'),
+                timeout: 5000
+              };
+            } else {
+              throw new Error('Could not extract code parameter');
+            }
+          } catch (emergencyError) {
+            return res.status(400).json({
+              error: 'Invalid JSON',
+              message: 'Request body contains invalid JSON format that cannot be automatically repaired',
+              details: thirdError.message,
+              suggestion: 'Try using simpler JavaScript syntax or contact support',
+              timestamp: new Date().toISOString()
+            });
+          }
         }
       }
     }
