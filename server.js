@@ -12,96 +12,121 @@ app.set('trust proxy', 1);
 // Middleware
 app.use(cors());
 
-// Custom JSON parser that handles Make.com's malformed JSON
-app.use('/api/', express.text({ type: 'application/json', limit: '1mb' }));
+// Enhanced JSON parser specifically for Make.com compatibility
+app.use('/api/', express.raw({ type: 'application/json', limit: '1mb' }));
 app.use('/api/', (req, res, next) => {
-  if (typeof req.body === 'string') {
+  if (Buffer.isBuffer(req.body)) {
+    const bodyString = req.body.toString('utf8');
+    
     try {
-      // First try normal parsing
-      req.body = JSON.parse(req.body);
+      // Try standard JSON parsing first
+      req.body = JSON.parse(bodyString);
+      console.log('Standard JSON parsing successful');
     } catch (error) {
+      console.log('Standard JSON parsing failed, attempting repair...');
+      
       try {
-        // If that fails, clean up the malformed JSON from Make.com
-        console.log('Fixing malformed JSON from Make.com...');
+        // Emergency extraction method - directly extract the code field
+        // This handles cases where Make.com sends malformed JSON
+        const codeMatch = bodyString.match(/"code"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        const timeoutMatch = bodyString.match(/"timeout"\s*:\s*(\d+)/);
         
-        // Clean up line breaks and extra whitespace in JSON structure
-        let cleanedBody = req.body
-          .replace(/\r\n/g, ' ')  // Replace \r\n with space
-          .replace(/\r/g, ' ')    // Replace \r with space  
-          .replace(/\n/g, ' ')    // Replace \n with space
-          .replace(/\s+/g, ' ')   // Replace multiple spaces with single space
-          .trim();                // Remove leading/trailing whitespace
-        
-        req.body = JSON.parse(cleanedBody);
-        console.log('Successfully parsed cleaned JSON');
-      } catch (secondError) {
-        try {
-          // Last resort: try to fix common JSON issues
-          console.log('Attempting advanced JSON repair...');
-          let repairedBody = req.body
-            .replace(/\r\n/g, ' ')
-            .replace(/\r/g, ' ')
-            .replace(/\n/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim();
+        if (codeMatch) {
+          // Unescape the code string
+          let code = codeMatch[1];
+          // Handle escaped characters
+          code = code.replace(/\\"/g, '"')
+                    .replace(/\\'/g, "'")
+                    .replace(/\\n/g, '\n')
+                    .replace(/\\r/g, '\r')
+                    .replace(/\\t/g, '\t')
+                    .replace(/\\\\/g, '\\');
           
-          // Try to find and fix specific JSON syntax issues
-          // Look for the position mentioned in the error (around position 904)
-          if (secondError.message.includes('position')) {
-            const match = secondError.message.match(/position (\d+)/);
-            if (match) {
-              const pos = parseInt(match[1]);
-              console.log(`Attempting to fix JSON around position ${pos}`);
-              
-              // Show context around the error
-              const start = Math.max(0, pos - 50);
-              const end = Math.min(repairedBody.length, pos + 50);
-              console.log('Context:', repairedBody.substring(start, end));
-            }
-          }
+          req.body = {
+            code: code,
+            timeout: timeoutMatch ? parseInt(timeoutMatch[1]) : 5000,
+            context: {}
+          };
           
-          req.body = JSON.parse(repairedBody);
-          console.log('Successfully parsed with advanced repair');
-        } catch (thirdError) {
-          console.error('All JSON parsing attempts failed:', thirdError);
-          console.log('Raw body length:', req.body.length);
-          console.log('First 200 chars:', req.body.substring(0, 200));
-          console.log('Last 200 chars:', req.body.substring(req.body.length - 200));
-          
-          // Try to extract just the code parameter as a fallback
-          try {
-            console.log('Attempting emergency code extraction...');
-            const codeMatch = req.body.match(/"code"\s*:\s*"([^"]*(?:\\.[^"]*)*)"/) || 
-                             req.body.match(/"code"\s*:\s*'([^']*(?:\\.[^']*)*)'/) ||
-                             req.body.match(/"code"\s*:\s*`([^`]*(?:\\.[^`]*)*)`/);
+          console.log('Emergency extraction successful');
+          console.log('Code length:', code.length);
+        } else {
+          // Try another extraction pattern for unescaped JSON
+          // This handles cases where the code might not be properly quoted
+          const startIdx = bodyString.indexOf('"code"');
+          if (startIdx !== -1) {
+            const colonIdx = bodyString.indexOf(':', startIdx);
+            const openQuote = bodyString.indexOf('"', colonIdx);
             
-            if (codeMatch) {
-              console.log('Emergency extraction successful');
-              req.body = {
-                code: codeMatch[1].replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\"/g, '"'),
-                timeout: 5000
-              };
+            if (openQuote !== -1) {
+              // Find the matching close quote, accounting for escaped quotes
+              let closeQuote = -1;
+              let i = openQuote + 1;
+              while (i < bodyString.length) {
+                if (bodyString[i] === '"' && bodyString[i-1] !== '\\') {
+                  closeQuote = i;
+                  break;
+                }
+                i++;
+              }
+              
+              if (closeQuote !== -1) {
+                let code = bodyString.substring(openQuote + 1, closeQuote);
+                // Unescape
+                code = code.replace(/\\"/g, '"')
+                          .replace(/\\'/g, "'")
+                          .replace(/\\n/g, '\n')
+                          .replace(/\\r/g, '\r')
+                          .replace(/\\t/g, '\t')
+                          .replace(/\\\\/g, '\\');
+                
+                const timeoutMatch = bodyString.match(/"timeout"\s*:\s*(\d+)/);
+                
+                req.body = {
+                  code: code,
+                  timeout: timeoutMatch ? parseInt(timeoutMatch[1]) : 5000,
+                  context: {}
+                };
+                
+                console.log('Alternative extraction successful');
+              } else {
+                throw new Error('Could not find closing quote for code field');
+              }
             } else {
-              throw new Error('Could not extract code parameter');
+              throw new Error('Could not find opening quote for code field');
             }
-          } catch (emergencyError) {
-            return res.status(400).json({
-              error: 'Invalid JSON',
-              message: 'Request body contains invalid JSON format that cannot be automatically repaired',
-              details: thirdError.message,
-              suggestion: 'Try using simpler JavaScript syntax or contact support',
-              timestamp: new Date().toISOString()
-            });
+          } else {
+            throw new Error('Could not find code field in request');
           }
         }
+      } catch (extractionError) {
+        console.error('All parsing attempts failed:', extractionError);
+        
+        // Last resort: try to be helpful with the error message
+        return res.status(400).json({
+          error: 'Invalid JSON',
+          message: 'Could not parse the request. Make sure to properly escape quotes in your JavaScript code.',
+          suggestion: 'In Make.com, try using single quotes instead of double quotes in your JavaScript code, or use the Set Variable module to store your code first.',
+          details: extractionError.message,
+          timestamp: new Date().toISOString()
+        });
       }
     }
+  } else if (typeof req.body === 'string') {
+    // Handle string body (shouldn't happen with raw parser, but just in case)
+    try {
+      req.body = JSON.parse(req.body);
+    } catch (error) {
+      return res.status(400).json({
+        error: 'Invalid JSON',
+        message: 'Request body is not valid JSON',
+        timestamp: new Date().toISOString()
+      });
+    }
   }
+  
   next();
 });
-
-// Standard JSON parser for other routes
-app.use(express.json({ limit: '1mb' }));
 
 // Standard JSON parser for other routes
 app.use(express.json({ limit: '1mb' }));
@@ -143,7 +168,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '1.0.0'
+    version: '1.1.0' // Updated version
   });
 });
 
@@ -300,6 +325,7 @@ app.post('/api/execute', authenticateApiKey, async (req, res) => {
     res.status(500).json({
       error: 'Internal server error',
       message: 'An unexpected error occurred',
+      details: error.message,
       timestamp: new Date().toISOString()
     });
   }
