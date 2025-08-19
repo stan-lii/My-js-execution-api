@@ -9,107 +9,96 @@ const PORT = process.env.PORT || 3000;
 // Trust proxy for Vercel
 app.set('trust proxy', 1);
 
-// Middleware
+// CORS
 app.use(cors());
 
-// FIXED: Proper middleware order and conflict resolution
-app.use((req, res, next) => {
-  if (!req.path.startsWith('/api/')) {
-    return next();
-  }
-  
-  express.json({ limit: '1mb' })(req, res, (err) => {
-    if (err || !req.body) {
-      console.log('Standard JSON failed, using raw parser...');
-      express.raw({ type: 'application/json', limit: '1mb' })(req, res, next);
-    } else {
-      console.log('Standard JSON parsing successful');
-      next();
-    }
-  });
-});
-
-// Enhanced Make.com JSON repair middleware
-app.use('/api/', (req, res, next) => {
-  if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
-    console.log('Body already parsed, skipping repair');
-    return next();
-  }
-  
-  if (Buffer.isBuffer(req.body)) {
-    const bodyString = req.body.toString('utf8');
-    console.log('Attempting to repair malformed JSON from Make.com...');
-    
-    try {
-      const extractedBody = {};
-      
-      // Extract code field
-      const codeMatch = bodyString.match(/"code"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-      if (codeMatch) {
-        extractedBody.code = codeMatch[1]
-          .replace(/\\"/g, '"')
-          .replace(/\\'/g, "'")
-          .replace(/\\n/g, '\n')
-          .replace(/\\r/g, '\r')
-          .replace(/\\t/g, '\t')
-          .replace(/\\\\/g, '\\');
-      }
-      
-      // Extract timeout field
-      const timeoutMatch = bodyString.match(/"timeout"\s*:\s*(\d+)/);
-      extractedBody.timeout = timeoutMatch ? parseInt(timeoutMatch[1]) : 5000;
-      
-      // Extract context field
-      let context = {};
-      const contextMatch = bodyString.match(/"context"\s*:\s*({[\s\S]*?})(?=\s*[,}])/);
-      if (contextMatch) {
-        try {
-          context = JSON.parse(contextMatch[1]);
-          console.log('Context extracted successfully:', Object.keys(context));
-        } catch (e) {
-          console.log('Context parsing failed, trying input extraction...');
-          const inputMatch = bodyString.match(/"input"\s*:\s*({[\s\S]*?})(?=\s*[,}])/);
-          if (inputMatch) {
-            try {
-              const inputValue = JSON.parse(inputMatch[1]);
-              context = { input: inputValue };
-              console.log('Input extracted successfully');
-            } catch (e2) {
-              console.log('Input extraction failed, using empty context');
-              context = {};
-            }
-          }
-        }
-      }
-      
-      extractedBody.context = context;
-      req.body = extractedBody;
-      
-      console.log('Emergency extraction successful');
-      console.log('Final context keys:', Object.keys(context));
-      
-    } catch (extractionError) {
-      console.error('All parsing attempts failed:', extractionError);
-      return res.status(400).json({
-        error: 'Invalid JSON',
-        message: 'Could not parse the malformed JSON from Make.com',
-        suggestion: 'Use the Set Variable module in Make.com to store complex data',
-        details: extractionError.message,
-        timestamp: new Date().toISOString()
-      });
-    }
-  }
-  
-  next();
-});
-
-// Rate limiting
+// Rate limiting - applied early
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 100,
   message: 'Too many requests from this IP, please try again later.'
 });
 app.use('/api/', limiter);
+
+// Body parsing middleware - simple and reliable
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+app.use(express.raw({ type: 'application/json', limit: '1mb' }));
+
+// Enhanced JSON repair middleware for Make.com
+app.use('/api/', (req, res, next) => {
+  // Only process if body is a Buffer (raw body)
+  if (Buffer.isBuffer(req.body)) {
+    const bodyString = req.body.toString('utf8');
+    console.log('Repairing malformed JSON from Make.com...');
+    
+    try {
+      // Try standard JSON parse first
+      req.body = JSON.parse(bodyString);
+      console.log('Standard JSON repair successful');
+      return next();
+    } catch (error) {
+      console.log('Standard parse failed, attempting emergency extraction...');
+      
+      try {
+        const extractedBody = {};
+        
+        // Extract code field
+        const codeMatch = bodyString.match(/"code"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        if (codeMatch) {
+          extractedBody.code = codeMatch[1]
+            .replace(/\\"/g, '"')
+            .replace(/\\'/g, "'")
+            .replace(/\\n/g, '\n')
+            .replace(/\\r/g, '\r')
+            .replace(/\\t/g, '\t')
+            .replace(/\\\\/g, '\\');
+        }
+        
+        // Extract timeout
+        const timeoutMatch = bodyString.match(/"timeout"\s*:\s*(\d+)/);
+        extractedBody.timeout = timeoutMatch ? parseInt(timeoutMatch[1]) : 5000;
+        
+        // Extract context
+        let context = {};
+        const contextMatch = bodyString.match(/"context"\s*:\s*({[\s\S]*?})(?=\s*[,}])/);
+        if (contextMatch) {
+          try {
+            context = JSON.parse(contextMatch[1]);
+            console.log('Context extracted:', Object.keys(context));
+          } catch (contextError) {
+            // Try to extract input field directly
+            const inputMatch = bodyString.match(/"input"\s*:\s*({[\s\S]*?})(?=\s*[,}])/);
+            if (inputMatch) {
+              try {
+                const inputValue = JSON.parse(inputMatch[1]);
+                context = { input: inputValue };
+                console.log('Input field extracted');
+              } catch (inputError) {
+                context = {};
+              }
+            }
+          }
+        }
+        
+        extractedBody.context = context;
+        req.body = extractedBody;
+        
+        console.log('Emergency extraction successful');
+        
+      } catch (extractionError) {
+        console.error('All JSON parsing failed:', extractionError);
+        return res.status(400).json({
+          error: 'Invalid JSON',
+          message: 'Could not parse request body',
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+  }
+  
+  next();
+});
 
 // API Key authentication middleware
 const authenticateApiKey = (req, res, next) => {
@@ -122,7 +111,10 @@ const authenticateApiKey = (req, res, next) => {
     });
   }
   
-  const validApiKeys = process.env.VALID_API_KEYS?.split(',') || ['demo-key-123'];
+  const validApiKeys = process.env.VALID_API_KEYS?.split(',') || [
+    'demo-key-123', 
+    'js-exec-7K9mP3nR8vW2qL5xY1zC4tA6'
+  ];
   
   if (!validApiKeys.includes(apiKey)) {
     return res.status(401).json({ 
@@ -134,7 +126,7 @@ const authenticateApiKey = (req, res, next) => {
   next();
 };
 
-// Common JavaScript execution function
+// FIXED: JavaScript execution function defined BEFORE routes that use it
 async function executeJavaScript(code, timeout = 5000, context = {}, res) {
   console.log('=== EXECUTION REQUEST ===');
   console.log('Code length:', code ? code.length : 0);
@@ -162,8 +154,10 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
     });
   }
   
+  // Clean up line breaks
   const cleanCode = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   
+  // Create secure sandbox
   const vm = new NodeVM({
     console: 'redirect',
     sandbox: context,
@@ -176,6 +170,7 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
   let output = [];
   let errors = [];
   
+  // Capture console output
   vm.on('console.log', (...args) => {
     const message = args.map(arg => {
       if (typeof arg === 'object') {
@@ -206,10 +201,12 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
   try {
     let executableCode = cleanCode.trim();
     
+    // Handle simple expressions
     if (!executableCode.includes(';') && !executableCode.includes('\n') && 
         !executableCode.match(/^(var|let|const|if|for|while|function|console\.|{)/)) {
       executableCode = `return (${executableCode});`;
     } else {
+      // Check for explicit return
       const hasExplicitReturn = /^(?:(?!function)[\s\S])*?^[ \t]*return\s+/m.test(executableCode);
       
       if (!hasExplicitReturn) {
@@ -218,6 +215,7 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
         if (lines.length > 0) {
           const lastLine = lines[lines.length - 1];
           
+          // Check if last line is a simple expression
           if (lastLine.match(/^[a-zA-Z_$][\w.$]*;?$/) ||
               lastLine.match(/^{[\s\S]*};?$/) ||
               lastLine.match(/^\[[\s\S]*\];?$/) ||
@@ -229,6 +227,7 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
             const otherLines = lines.slice(0, -1);
             executableCode = [...otherLines, `return (${cleanLastLine});`].join('\n');
           } else {
+            // Wrap in IIFE
             executableCode = `(() => { ${executableCode} })()`;
           }
         }
@@ -248,6 +247,7 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
   
   const executionTime = Date.now() - startTime;
   
+  // Serialize result
   let serializedResult;
   try {
     serializedResult = JSON.parse(JSON.stringify(result));
@@ -257,8 +257,6 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
   
   console.log('=== EXECUTION COMPLETE ===');
   console.log('Execution time:', executionTime + 'ms');
-  console.log('Result type:', typeof result);
-  console.log('Output messages:', output.length);
   
   res.json({
     success: true,
@@ -283,7 +281,7 @@ app.get('/health', (req, res) => {
 app.post('/api/execute', authenticateApiKey, async (req, res) => {
   try {
     const { code, timeout = 5000, context = {} } = req.body;
-    return executeJavaScript(code, timeout, context, res);
+    return await executeJavaScript(code, timeout, context, res);
   } catch (error) {
     console.error('API Error:', error);
     res.status(500).json({
@@ -295,14 +293,13 @@ app.post('/api/execute', authenticateApiKey, async (req, res) => {
   }
 });
 
-// Query parameter endpoint for Make.com compatibility
+// Query parameter endpoint (Make.com workaround)
 app.get('/api/execute-query', authenticateApiKey, async (req, res) => {
   try {
     const { code, timeout = 5000, input_data } = req.query;
     
-    console.log('=== QUERY EXECUTION REQUEST ===');
+    console.log('=== QUERY EXECUTION ===');
     console.log('Code length:', code ? code.length : 0);
-    console.log('Input data:', input_data ? 'provided' : 'none');
     
     if (!code) {
       return res.status(400).json({
@@ -317,13 +314,13 @@ app.get('/api/execute-query', authenticateApiKey, async (req, res) => {
         context.input = JSON.parse(decodeURIComponent(input_data));
         console.log('Input data parsed successfully');
       } catch (parseError) {
-        console.log('Input data parsing failed:', parseError.message);
+        console.log('Input parsing failed:', parseError.message);
         context.input = input_data;
       }
     }
     
     const decodedCode = decodeURIComponent(code);
-    return executeJavaScript(decodedCode, parseInt(timeout), context, res);
+    return await executeJavaScript(decodedCode, parseInt(timeout), context, res);
     
   } catch (error) {
     console.error('Query API Error:', error);
@@ -336,27 +333,33 @@ app.get('/api/execute-query', authenticateApiKey, async (req, res) => {
   }
 });
 
-// Form-encoded endpoint for Make.com compatibility
-app.post('/api/execute-form', authenticateApiKey, express.urlencoded({ extended: true }), async (req, res) => {
+// Form data endpoint (Make.com workaround)
+app.post('/api/execute-form', authenticateApiKey, async (req, res) => {
   try {
     const { code, timeout = 5000, input_data } = req.body;
     
-    console.log('=== FORM EXECUTION REQUEST ===');
+    console.log('=== FORM EXECUTION ===');
     console.log('Code length:', code ? code.length : 0);
-    console.log('Input data:', input_data ? 'provided' : 'none');
+    
+    if (!code) {
+      return res.status(400).json({
+        error: 'Missing code parameter',
+        message: 'Please provide JavaScript code'
+      });
+    }
     
     let context = {};
     if (input_data) {
       try {
         context.input = JSON.parse(input_data);
-        console.log('Input data parsed successfully from form');
+        console.log('Form input parsed successfully');
       } catch (parseError) {
-        console.log('Input data parsing failed:', parseError.message);
+        console.log('Form input parsing failed:', parseError.message);
         context.input = input_data;
       }
     }
     
-    return executeJavaScript(code, parseInt(timeout), context, res);
+    return await executeJavaScript(code, parseInt(timeout), context, res);
     
   } catch (error) {
     console.error('Form API Error:', error);
@@ -369,7 +372,7 @@ app.post('/api/execute-form', authenticateApiKey, express.urlencoded({ extended:
   }
 });
 
-// Function execution endpoint with predefined functions
+// Function execution endpoint
 app.post('/api/function', authenticateApiKey, async (req, res) => {
   try {
     const { functionName, parameters = {}, timeout = 5000 } = req.body;
@@ -384,7 +387,7 @@ app.post('/api/function', authenticateApiKey, async (req, res) => {
     const functions = {
       calculate: (expression) => {
         const vm = new NodeVM({ timeout: 2000 });
-        return vm.run(`const Math = require('math'); ${expression}`);
+        return vm.run(`Math.${expression}`);
       },
       
       transformText: (text, operation) => {
@@ -396,7 +399,6 @@ app.post('/api/function', authenticateApiKey, async (req, res) => {
           capitalize: (str) => str.charAt(0).toUpperCase() + str.slice(1).toLowerCase(),
           slugify: (str) => str.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
         };
-        
         return operations[operation] ? operations[operation](text) : text;
       },
       
@@ -410,7 +412,6 @@ app.post('/api/function', authenticateApiKey, async (req, res) => {
           sort: (arr) => [...arr].sort(),
           reverse: (arr) => [...arr].reverse()
         };
-        
         return operations[operation] ? operations[operation](array) : array;
       },
       
@@ -427,7 +428,6 @@ app.post('/api/function', authenticateApiKey, async (req, res) => {
             day: 'numeric' 
           })
         };
-        
         return formats[format] ? formats[format]() : d.toString();
       }
     };
@@ -468,7 +468,7 @@ app.get('/api/functions', authenticateApiKey, (req, res) => {
     calculate: {
       description: 'Execute mathematical expressions',
       parameters: ['expression'],
-      example: { expression: 'Math.sqrt(16) + 5' }
+      example: { expression: 'sqrt(16) + 5' }
     },
     transformText: {
       description: 'Transform text using various operations',
@@ -497,7 +497,7 @@ app.get('/api/functions', authenticateApiKey, (req, res) => {
   });
 });
 
-// Error handling middleware
+// Global error handling middleware
 app.use((error, req, res, next) => {
   console.error('Unhandled error:', error);
   res.status(500).json({
@@ -515,7 +515,7 @@ app.use('*', (req, res) => {
       'GET /health',
       'POST /api/execute',
       'GET /api/execute-query',
-      'POST /api/execute-form', 
+      'POST /api/execute-form',
       'POST /api/function',
       'GET /api/functions'
     ]
