@@ -26,102 +26,85 @@ app.use('/api/', (req, res, next) => {
       console.log('Standard JSON parsing failed, attempting repair...');
       
       try {
-        // Emergency extraction method - directly extract the code field
-        // This handles cases where Make.com sends malformed JSON
+        // Enhanced emergency extraction that preserves context
+        console.log('Attempting emergency extraction with context support...');
+        
+        // Extract code field
         const codeMatch = bodyString.match(/"code"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        if (!codeMatch) {
+          throw new Error('Could not find code field in request');
+        }
+        
+        // Extract timeout field (optional)
         const timeoutMatch = bodyString.match(/"timeout"\s*:\s*(\d+)/);
         
-        if (codeMatch) {
-          // Unescape the code string
-          let code = codeMatch[1];
-          // Handle escaped characters
-          code = code.replace(/\\"/g, '"')
-                    .replace(/\\'/g, "'")
-                    .replace(/\\n/g, '\n')
-                    .replace(/\\r/g, '\r')
-                    .replace(/\\t/g, '\t')
-                    .replace(/\\\\/g, '\\');
-          
-          req.body = {
-            code: code,
-            timeout: timeoutMatch ? parseInt(timeoutMatch[1]) : 5000,
-            context: {}
-          };
-          
-          console.log('Emergency extraction successful');
-          console.log('Code length:', code.length);
-        } else {
-          // Try another extraction pattern for unescaped JSON
-          // This handles cases where the code might not be properly quoted
-          const startIdx = bodyString.indexOf('"code"');
-          if (startIdx !== -1) {
-            const colonIdx = bodyString.indexOf(':', startIdx);
-            const openQuote = bodyString.indexOf('"', colonIdx);
+        // Extract context field (more robust pattern)
+        let context = {};
+        const contextStart = bodyString.indexOf('"context"');
+        if (contextStart !== -1) {
+          const colonPos = bodyString.indexOf(':', contextStart);
+          if (colonPos !== -1) {
+            // Find the opening brace for context object
+            let bracePos = colonPos + 1;
+            while (bracePos < bodyString.length && bodyString[bracePos] !== '{') {
+              bracePos++;
+            }
             
-            if (openQuote !== -1) {
-              // Find the matching close quote, accounting for escaped quotes
-              let closeQuote = -1;
-              let i = openQuote + 1;
-              while (i < bodyString.length) {
-                if (bodyString[i] === '"' && bodyString[i-1] !== '\\') {
-                  closeQuote = i;
+            if (bracePos < bodyString.length) {
+              // Find matching closing brace
+              let braceCount = 0;
+              let endPos = bracePos;
+              for (let i = bracePos; i < bodyString.length; i++) {
+                if (bodyString[i] === '{') braceCount++;
+                if (bodyString[i] === '}') braceCount--;
+                if (braceCount === 0) {
+                  endPos = i;
                   break;
                 }
-                i++;
               }
               
-              if (closeQuote !== -1) {
-                let code = bodyString.substring(openQuote + 1, closeQuote);
-                // Unescape
-                code = code.replace(/\\"/g, '"')
-                          .replace(/\\'/g, "'")
-                          .replace(/\\n/g, '\n')
-                          .replace(/\\r/g, '\r')
-                          .replace(/\\t/g, '\t')
-                          .replace(/\\\\/g, '\\');
-                
-                const timeoutMatch = bodyString.match(/"timeout"\s*:\s*(\d+)/);
-                
-                req.body = {
-                  code: code,
-                  timeout: timeoutMatch ? parseInt(timeoutMatch[1]) : 5000,
-                  context: {}
-                };
-                
-                console.log('Alternative extraction successful');
-              } else {
-                throw new Error('Could not find closing quote for code field');
+              const contextString = bodyString.substring(bracePos, endPos + 1);
+              try {
+                context = JSON.parse(contextString);
+                console.log('Context extracted successfully:', Object.keys(context));
+              } catch (contextError) {
+                console.log('Context parsing failed, using empty context');
+                context = {};
               }
-            } else {
-              throw new Error('Could not find opening quote for code field');
             }
-          } else {
-            throw new Error('Could not find code field in request');
           }
         }
+        
+        // Unescape the code string
+        let code = codeMatch[1];
+        code = code.replace(/\\"/g, '"')
+                  .replace(/\\'/g, "'")
+                  .replace(/\\n/g, '\n')
+                  .replace(/\\r/g, '\r')
+                  .replace(/\\t/g, '\t')
+                  .replace(/\\\\/g, '\\');
+        
+        req.body = {
+          code: code,
+          timeout: timeoutMatch ? parseInt(timeoutMatch[1]) : 5000,
+          context: context
+        };
+        
+        console.log('Emergency extraction successful');
+        console.log('Code length:', code.length);
+        console.log('Context keys:', Object.keys(context));
+        
       } catch (extractionError) {
         console.error('All parsing attempts failed:', extractionError);
         
-        // Last resort: try to be helpful with the error message
         return res.status(400).json({
           error: 'Invalid JSON',
-          message: 'Could not parse the request. Make sure to properly escape quotes in your JavaScript code.',
-          suggestion: 'In Make.com, try using single quotes instead of double quotes in your JavaScript code, or use the Set Variable module to store your code first.',
+          message: 'Could not parse the request. The JSON structure is malformed.',
+          suggestion: 'Try using the Set Variable module in Make.com to store your code first.',
           details: extractionError.message,
           timestamp: new Date().toISOString()
         });
       }
-    }
-  } else if (typeof req.body === 'string') {
-    // Handle string body (shouldn't happen with raw parser, but just in case)
-    try {
-      req.body = JSON.parse(req.body);
-    } catch (error) {
-      return res.status(400).json({
-        error: 'Invalid JSON',
-        message: 'Request body is not valid JSON',
-        timestamp: new Date().toISOString()
-      });
     }
   }
   
@@ -168,7 +151,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '1.1.0' // Updated version
+    version: '1.2.0' // Updated version
   });
 });
 
@@ -176,6 +159,11 @@ app.get('/health', (req, res) => {
 app.post('/api/execute', authenticateApiKey, async (req, res) => {
   try {
     const { code, timeout = 5000, context = {} } = req.body;
+    
+    console.log('=== EXECUTION REQUEST ===');
+    console.log('Code length:', code ? code.length : 0);
+    console.log('Timeout:', timeout);
+    console.log('Context keys:', Object.keys(context));
     
     if (!code) {
       return res.status(400).json({
@@ -310,6 +298,11 @@ app.post('/api/execute', authenticateApiKey, async (req, res) => {
     } catch (serializationError) {
       serializedResult = String(result);
     }
+    
+    console.log('=== EXECUTION COMPLETE ===');
+    console.log('Execution time:', executionTime + 'ms');
+    console.log('Result type:', typeof result);
+    console.log('Output messages:', output.length);
     
     res.json({
       success: true,
