@@ -11,6 +11,44 @@ app.set('trust proxy', 1);
 
 // Middleware
 app.use(cors());
+
+// Custom JSON parser that handles Make.com's malformed JSON
+app.use('/api/', express.text({ type: 'application/json', limit: '1mb' }));
+app.use('/api/', (req, res, next) => {
+  if (typeof req.body === 'string') {
+    try {
+      // First try normal parsing
+      req.body = JSON.parse(req.body);
+    } catch (error) {
+      try {
+        // If that fails, clean up the malformed JSON from Make.com
+        console.log('Fixing malformed JSON from Make.com...');
+        
+        // Clean up line breaks and extra whitespace in JSON structure
+        let cleanedBody = req.body
+          .replace(/\r\n/g, ' ')  // Replace \r\n with space
+          .replace(/\r/g, ' ')    // Replace \r with space  
+          .replace(/\n/g, ' ')    // Replace \n with space
+          .replace(/\s+/g, ' ')   // Replace multiple spaces with single space
+          .trim();                // Remove leading/trailing whitespace
+        
+        req.body = JSON.parse(cleanedBody);
+        console.log('Successfully parsed cleaned JSON');
+      } catch (secondError) {
+        console.error('JSON parsing failed even after cleaning:', secondError);
+        return res.status(400).json({
+          error: 'Invalid JSON',
+          message: 'Request body contains invalid JSON format',
+          details: secondError.message,
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+  }
+  next();
+});
+
+// Standard JSON parser for other routes
 app.use(express.json({ limit: '1mb' }));
 
 // Rate limiting
