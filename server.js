@@ -340,6 +340,7 @@ app.post('/api/execute-form', authenticateApiKey, async (req, res) => {
     
     console.log('=== FORM EXECUTION ===');
     console.log('Code length:', code ? code.length : 0);
+    console.log('Raw input_data:', input_data);
     
     if (!code) {
       return res.status(400).json({
@@ -351,13 +352,51 @@ app.post('/api/execute-form', authenticateApiKey, async (req, res) => {
     let context = {};
     if (input_data) {
       try {
+        // First try standard JSON parsing
         context.input = JSON.parse(input_data);
-        console.log('Form input parsed successfully');
+        console.log('Standard JSON parsing successful');
       } catch (parseError) {
-        console.log('Form input parsing failed:', parseError.message);
-        context.input = input_data;
+        console.log('Standard JSON parsing failed:', parseError.message);
+        
+        try {
+          // Make.com often sends malformed JSON like: {"obj1"}, {"obj2"}, {"obj3"}
+          // Try to fix it by wrapping in array brackets
+          let fixedInput = input_data.trim();
+          
+          // Check if it looks like multiple objects separated by commas
+          if (fixedInput.match(/}\s*,\s*{/) && !fixedInput.startsWith('[')) {
+            console.log('Detected multiple objects, wrapping in array brackets');
+            fixedInput = `[${fixedInput}]`;
+          }
+          
+          context.input = JSON.parse(fixedInput);
+          console.log('Fixed JSON parsing successful');
+        } catch (secondError) {
+          console.log('Fixed JSON parsing also failed:', secondError.message);
+          
+          try {
+            // Last resort: try to extract individual objects and create array
+            console.log('Attempting emergency object extraction...');
+            const objectMatches = input_data.match(/{[^}]+}/g);
+            if (objectMatches) {
+              const parsedObjects = objectMatches.map(match => JSON.parse(match));
+              context.input = { array: parsedObjects, __IMTAGGLENGTH__: parsedObjects.length };
+              console.log('Emergency extraction successful, created array with', parsedObjects.length, 'objects');
+            } else {
+              // If all else fails, use as string
+              context.input = input_data;
+              console.log('Using input_data as raw string');
+            }
+          } catch (emergencyError) {
+            console.log('Emergency extraction failed, using as string');
+            context.input = input_data;
+          }
+        }
       }
     }
+    
+    console.log('Final context.input type:', typeof context.input);
+    console.log('Final context.input keys:', context.input && typeof context.input === 'object' ? Object.keys(context.input) : 'N/A');
     
     return await executeJavaScript(code, parseInt(timeout), context, res);
     
