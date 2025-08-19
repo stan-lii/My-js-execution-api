@@ -13,17 +13,13 @@ app.set('trust proxy', 1);
 app.use(cors());
 
 // FIXED: Proper middleware order and conflict resolution
-// First, try standard JSON parsing for well-formed requests
 app.use((req, res, next) => {
-  // Only apply to /api/ routes
   if (!req.path.startsWith('/api/')) {
     return next();
   }
   
-  // Try express.json() first for well-formed JSON
   express.json({ limit: '1mb' })(req, res, (err) => {
     if (err || !req.body) {
-      // If standard JSON parsing fails, fall back to raw parsing
       console.log('Standard JSON failed, using raw parser...');
       express.raw({ type: 'application/json', limit: '1mb' })(req, res, next);
     } else {
@@ -35,7 +31,6 @@ app.use((req, res, next) => {
 
 // Enhanced Make.com JSON repair middleware
 app.use('/api/', (req, res, next) => {
-  // Skip if we already have a parsed body
   if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
     console.log('Body already parsed, skipping repair');
     return next();
@@ -46,7 +41,6 @@ app.use('/api/', (req, res, next) => {
     console.log('Attempting to repair malformed JSON from Make.com...');
     
     try {
-      // Enhanced emergency extraction that preserves ALL fields
       const extractedBody = {};
       
       // Extract code field
@@ -65,55 +59,24 @@ app.use('/api/', (req, res, next) => {
       const timeoutMatch = bodyString.match(/"timeout"\s*:\s*(\d+)/);
       extractedBody.timeout = timeoutMatch ? parseInt(timeoutMatch[1]) : 5000;
       
-      // ENHANCED: Extract context with nested object support
+      // Extract context field
       let context = {};
-      
-      // Method 1: Try to find complete context object
       const contextMatch = bodyString.match(/"context"\s*:\s*({[\s\S]*?})(?=\s*[,}])/);
       if (contextMatch) {
         try {
           context = JSON.parse(contextMatch[1]);
-          console.log('Context extracted via method 1:', Object.keys(context));
+          console.log('Context extracted successfully:', Object.keys(context));
         } catch (e) {
-          console.log('Method 1 failed, trying method 2...');
-          
-          // Method 2: Extract input field directly
+          console.log('Context parsing failed, trying input extraction...');
           const inputMatch = bodyString.match(/"input"\s*:\s*({[\s\S]*?})(?=\s*[,}])/);
           if (inputMatch) {
             try {
               const inputValue = JSON.parse(inputMatch[1]);
               context = { input: inputValue };
-              console.log('Input extracted via method 2');
+              console.log('Input extracted successfully');
             } catch (e2) {
-              console.log('Method 2 failed, trying method 3...');
-              
-              // Method 3: Try to extract any key-value pairs from context
-              const kvMatches = bodyString.match(/"(\w+)"\s*:\s*([^,}]+)/g);
-              if (kvMatches) {
-                kvMatches.forEach(match => {
-                  const kvMatch = match.match(/"(\w+)"\s*:\s*(.+)/);
-                  if (kvMatch) {
-                    const key = kvMatch[1];
-                    let value = kvMatch[2].trim();
-                    
-                    // Try to parse the value
-                    try {
-                      if (value.startsWith('{')) {
-                        context[key] = JSON.parse(value);
-                      } else if (value.startsWith('"') && value.endsWith('"')) {
-                        context[key] = value.slice(1, -1);
-                      } else if (!isNaN(value)) {
-                        context[key] = parseFloat(value);
-                      } else {
-                        context[key] = value;
-                      }
-                    } catch (e3) {
-                      context[key] = value;
-                    }
-                  }
-                });
-                console.log('Context extracted via method 3:', Object.keys(context));
-              }
+              console.log('Input extraction failed, using empty context');
+              context = {};
             }
           }
         }
@@ -143,7 +106,7 @@ app.use('/api/', (req, res, next) => {
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  max: 100,
   message: 'Too many requests from this IP, please try again later.'
 });
 app.use('/api/', limiter);
@@ -159,7 +122,6 @@ const authenticateApiKey = (req, res, next) => {
     });
   }
   
-  // In production, validate against a database or environment variable
   const validApiKeys = process.env.VALID_API_KEYS?.split(',') || ['demo-key-123'];
   
   if (!validApiKeys.includes(apiKey)) {
@@ -172,95 +134,6 @@ const authenticateApiKey = (req, res, next) => {
   next();
 };
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    version: '2.0.0' // Updated version
-  });
-});
-
-// Form-encoded endpoint for Make.com compatibility
-app.post('/api/execute-form', authenticateApiKey, express.urlencoded({ extended: true }), async (req, res) => {
-  try {
-    const { code, timeout = 5000, input_data } = req.body;
-    
-    console.log('=== FORM EXECUTION REQUEST ===');
-    console.log('Code length:', code ? code.length : 0);
-    console.log('Input data:', input_data ? 'provided' : 'none');
-    
-    // Parse input data if provided
-    let context = {};
-    if (input_data) {
-      try {
-        context.input = JSON.parse(input_data);
-        console.log('Input data parsed successfully from form');
-      } catch (parseError) {
-        console.log('Input data parsing failed:', parseError.message);
-        context.input = input_data; // Use as string if JSON parsing fails
-      }
-    }
-    
-    return executeJavaScript(code, parseInt(timeout), context, res);
-    
-  } catch (error) {
-    console.error('Form API Error:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      message: 'An unexpected error occurred',
-      details: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-// Query parameter endpoint for Make.com compatibility
-app.get('/api/execute-query', authenticateApiKey, async (req, res) => {
-  try {
-    const { code, timeout = 5000, input_data } = req.query;
-    
-    console.log('=== QUERY EXECUTION REQUEST ===');
-    console.log('Code length:', code ? code.length : 0);
-    console.log('Input data:', input_data ? 'provided' : 'none');
-    
-    if (!code) {
-      return res.status(400).json({
-        error: 'Missing code parameter',
-        message: 'Please provide JavaScript code in the "code" query parameter'
-      });
-    }
-    
-    // Parse input data if provided
-    let context = {};
-    if (input_data) {
-      try {
-        context.input = JSON.parse(decodeURIComponent(input_data));
-        console.log('Input data parsed successfully');
-      } catch (parseError) {
-        console.log('Input data parsing failed:', parseError.message);
-        context.input = input_data; // Use as string if JSON parsing fails
-      }
-    }
-    
-    // Decode the code (in case it's URL encoded)
-    const decodedCode = decodeURIComponent(code);
-    
-    return executeJavaScript(decodedCode, parseInt(timeout), context, res);
-    
-  } catch (error) {
-    console.error('Query API Error:', error);
-    res.status(500).json({
-      error: 'Internal server error',
-      message: 'An unexpected error occurred',
-      details: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
-// JavaScript execution endpoint
-app.post('/api/execute', authenticateApiKey, async (req, res) => {
 // Common JavaScript execution function
 async function executeJavaScript(code, timeout = 5000, context = {}, res) {
   console.log('=== EXECUTION REQUEST ===');
@@ -289,14 +162,12 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
     });
   }
   
-  // Clean up line breaks - normalize all line breaks to \n
   const cleanCode = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
   
-  // Create a secure sandbox
   const vm = new NodeVM({
     console: 'redirect',
     sandbox: context,
-    timeout: Math.min(timeout, 10000), // Max 10 seconds
+    timeout: Math.min(timeout, 10000),
     allowAsync: false,
     wrapper: 'none',
     strict: true
@@ -305,7 +176,6 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
   let output = [];
   let errors = [];
   
-  // Capture console output
   vm.on('console.log', (...args) => {
     const message = args.map(arg => {
       if (typeof arg === 'object') {
@@ -334,48 +204,32 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
   let result;
   
   try {
-    // Smart code execution that handles various cases
     let executableCode = cleanCode.trim();
     
-    // If it's a simple expression (no semicolons, no statements), wrap it
     if (!executableCode.includes(';') && !executableCode.includes('\n') && 
         !executableCode.match(/^(var|let|const|if|for|while|function|console\.|{)/)) {
       executableCode = `return (${executableCode});`;
     } else {
-      // For multi-line code, intelligently determine how to execute it
-      
-      // First, try to detect if the code already has a return statement at the top level
       const hasExplicitReturn = /^(?:(?!function)[\s\S])*?^[ \t]*return\s+/m.test(executableCode);
       
-      if (hasExplicitReturn) {
-        // Code already has explicit return, execute as-is
-        // No modification needed
-      } else {
-        // Try to identify what the last meaningful line is
+      if (!hasExplicitReturn) {
         const lines = executableCode.split('\n').map(line => line.trim()).filter(line => line && !line.startsWith('//'));
         
         if (lines.length > 0) {
           const lastLine = lines[lines.length - 1];
           
-          // If last line is a variable reference, object literal, or simple expression
-          if (lastLine.match(/^[a-zA-Z_$][\w.$]*;?$/) ||           // variable or property access
-              lastLine.match(/^{[\s\S]*};?$/) ||                   // object literal
-              lastLine.match(/^\[[\s\S]*\];?$/) ||                 // array literal
-              lastLine.match(/^["'`][\s\S]*["'`];?$/) ||           // string literal
-              lastLine.match(/^\d+(\.\d+)?;?$/) ||                 // number literal
-              lastLine.match(/^(true|false|null|undefined);?$/)) { // boolean/null/undefined
+          if (lastLine.match(/^[a-zA-Z_$][\w.$]*;?$/) ||
+              lastLine.match(/^{[\s\S]*};?$/) ||
+              lastLine.match(/^\[[\s\S]*\];?$/) ||
+              lastLine.match(/^["'`][\s\S]*["'`];?$/) ||
+              lastLine.match(/^\d+(\.\d+)?;?$/) ||
+              lastLine.match(/^(true|false|null|undefined);?$/)) {
             
-            // Remove semicolon if present and add return
             const cleanLastLine = lastLine.replace(/;$/, '');
             const otherLines = lines.slice(0, -1);
             executableCode = [...otherLines, `return (${cleanLastLine});`].join('\n');
           } else {
-            // For complex expressions or statements, wrap everything in an IIFE
-            executableCode = `
-              (() => {
-                ${executableCode}
-              })()
-            `;
+            executableCode = `(() => { ${executableCode} })()`;
           }
         }
       }
@@ -394,7 +248,6 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
   
   const executionTime = Date.now() - startTime;
   
-  // Serialize the result safely
   let serializedResult;
   try {
     serializedResult = JSON.parse(JSON.stringify(result));
@@ -417,13 +270,96 @@ async function executeJavaScript(code, timeout = 5000, context = {}, res) {
   });
 }
 
-// JavaScript execution endpoint
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    version: '2.1.0'
+  });
+});
+
+// Main JavaScript execution endpoint
 app.post('/api/execute', authenticateApiKey, async (req, res) => {
   try {
     const { code, timeout = 5000, context = {} } = req.body;
     return executeJavaScript(code, timeout, context, res);
   } catch (error) {
     console.error('API Error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'An unexpected error occurred',
+      details: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Query parameter endpoint for Make.com compatibility
+app.get('/api/execute-query', authenticateApiKey, async (req, res) => {
+  try {
+    const { code, timeout = 5000, input_data } = req.query;
+    
+    console.log('=== QUERY EXECUTION REQUEST ===');
+    console.log('Code length:', code ? code.length : 0);
+    console.log('Input data:', input_data ? 'provided' : 'none');
+    
+    if (!code) {
+      return res.status(400).json({
+        error: 'Missing code parameter',
+        message: 'Please provide JavaScript code in the "code" query parameter'
+      });
+    }
+    
+    let context = {};
+    if (input_data) {
+      try {
+        context.input = JSON.parse(decodeURIComponent(input_data));
+        console.log('Input data parsed successfully');
+      } catch (parseError) {
+        console.log('Input data parsing failed:', parseError.message);
+        context.input = input_data;
+      }
+    }
+    
+    const decodedCode = decodeURIComponent(code);
+    return executeJavaScript(decodedCode, parseInt(timeout), context, res);
+    
+  } catch (error) {
+    console.error('Query API Error:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: 'An unexpected error occurred',
+      details: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
+
+// Form-encoded endpoint for Make.com compatibility
+app.post('/api/execute-form', authenticateApiKey, express.urlencoded({ extended: true }), async (req, res) => {
+  try {
+    const { code, timeout = 5000, input_data } = req.body;
+    
+    console.log('=== FORM EXECUTION REQUEST ===');
+    console.log('Code length:', code ? code.length : 0);
+    console.log('Input data:', input_data ? 'provided' : 'none');
+    
+    let context = {};
+    if (input_data) {
+      try {
+        context.input = JSON.parse(input_data);
+        console.log('Input data parsed successfully from form');
+      } catch (parseError) {
+        console.log('Input data parsing failed:', parseError.message);
+        context.input = input_data;
+      }
+    }
+    
+    return executeJavaScript(code, parseInt(timeout), context, res);
+    
+  } catch (error) {
+    console.error('Form API Error:', error);
     res.status(500).json({
       error: 'Internal server error',
       message: 'An unexpected error occurred',
@@ -445,18 +381,12 @@ app.post('/api/function', authenticateApiKey, async (req, res) => {
       });
     }
     
-    // Predefined utility functions
     const functions = {
-      // Math utilities
       calculate: (expression) => {
         const vm = new NodeVM({ timeout: 2000 });
-        return vm.run(`
-          const Math = require('math');
-          ${expression}
-        `);
+        return vm.run(`const Math = require('math'); ${expression}`);
       },
       
-      // String manipulation
       transformText: (text, operation) => {
         const operations = {
           uppercase: (str) => str.toUpperCase(),
@@ -470,7 +400,6 @@ app.post('/api/function', authenticateApiKey, async (req, res) => {
         return operations[operation] ? operations[operation](text) : text;
       },
       
-      // Array utilities
       processArray: (array, operation) => {
         const operations = {
           sum: (arr) => arr.reduce((a, b) => a + b, 0),
@@ -485,7 +414,6 @@ app.post('/api/function', authenticateApiKey, async (req, res) => {
         return operations[operation] ? operations[operation](array) : array;
       },
       
-      // Date utilities
       formatDate: (date, format = 'ISO') => {
         const d = new Date(date);
         const formats = {
