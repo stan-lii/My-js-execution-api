@@ -38,38 +38,84 @@ app.use('/api/', (req, res, next) => {
         // Extract timeout field (optional)
         const timeoutMatch = bodyString.match(/"timeout"\s*:\s*(\d+)/);
         
-        // Extract context field (more robust pattern)
+        // Extract context field (enhanced robust pattern)
         let context = {};
         const contextStart = bodyString.indexOf('"context"');
         if (contextStart !== -1) {
           const colonPos = bodyString.indexOf(':', contextStart);
           if (colonPos !== -1) {
-            // Find the opening brace for context object
-            let bracePos = colonPos + 1;
-            while (bracePos < bodyString.length && bodyString[bracePos] !== '{') {
-              bracePos++;
+            // Find the start of the context value (could be { or ")
+            let valueStart = colonPos + 1;
+            while (valueStart < bodyString.length && /\s/.test(bodyString[valueStart])) {
+              valueStart++;
             }
             
-            if (bracePos < bodyString.length) {
-              // Find matching closing brace
-              let braceCount = 0;
-              let endPos = bracePos;
-              for (let i = bracePos; i < bodyString.length; i++) {
-                if (bodyString[i] === '{') braceCount++;
-                if (bodyString[i] === '}') braceCount--;
-                if (braceCount === 0) {
-                  endPos = i;
-                  break;
+            if (valueStart < bodyString.length) {
+              let contextString = '';
+              
+              if (bodyString[valueStart] === '{') {
+                // Context is an object - find matching closing brace
+                let braceCount = 0;
+                let endPos = valueStart;
+                for (let i = valueStart; i < bodyString.length; i++) {
+                  if (bodyString[i] === '{') braceCount++;
+                  if (bodyString[i] === '}') braceCount--;
+                  if (braceCount === 0) {
+                    endPos = i;
+                    break;
+                  }
+                }
+                contextString = bodyString.substring(valueStart, endPos + 1);
+              } else {
+                // Context might be a string or other value - find the end
+                // Look for the closing of the main JSON object
+                const remaining = bodyString.substring(valueStart);
+                const match = remaining.match(/^([^}]*)/);
+                if (match) {
+                  contextString = '{' + match[1].replace(/,$/, '') + '}';
                 }
               }
               
-              const contextString = bodyString.substring(bracePos, endPos + 1);
               try {
-                context = JSON.parse(contextString);
-                console.log('Context extracted successfully:', Object.keys(context));
+                // If contextString looks like it contains an object, try to parse it
+                if (contextString.includes('{') && contextString.includes('}')) {
+                  context = JSON.parse(contextString);
+                  console.log('Context extracted successfully:', Object.keys(context));
+                } else {
+                  // Try to extract input field directly if context parsing fails
+                  const inputMatch = bodyString.match(/"input"\s*:\s*({[^}]*}|\[[^\]]*\]|"[^"]*"|[^,}]+)/);
+                  if (inputMatch) {
+                    try {
+                      const inputValue = JSON.parse(inputMatch[1]);
+                      context = { input: inputValue };
+                      console.log('Input extracted directly from context');
+                    } catch (inputError) {
+                      console.log('Direct input extraction failed');
+                      context = {};
+                    }
+                  } else {
+                    console.log('No input field found in context');
+                    context = {};
+                  }
+                }
               } catch (contextError) {
-                console.log('Context parsing failed, using empty context');
-                context = {};
+                console.log('Context parsing failed, attempting input extraction...');
+                
+                // Last resort: try to extract just the input field value
+                const inputMatch = bodyString.match(/"input"\s*:\s*({.*?}(?=\s*[,}]))/);
+                if (inputMatch) {
+                  try {
+                    const inputValue = JSON.parse(inputMatch[1]);
+                    context = { input: inputValue };
+                    console.log('Input field extracted successfully');
+                  } catch (inputError) {
+                    console.log('Input field extraction failed, using empty context');
+                    context = {};
+                  }
+                } else {
+                  console.log('Could not find input field, using empty context');
+                  context = {};
+                }
               }
             }
           }
