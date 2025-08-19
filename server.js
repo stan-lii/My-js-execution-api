@@ -12,153 +12,133 @@ app.set('trust proxy', 1);
 // Middleware
 app.use(cors());
 
-// Enhanced JSON parser specifically for Make.com compatibility
-app.use('/api/', express.raw({ type: 'application/json', limit: '1mb' }));
+// FIXED: Proper middleware order and conflict resolution
+// First, try standard JSON parsing for well-formed requests
+app.use((req, res, next) => {
+  // Only apply to /api/ routes
+  if (!req.path.startsWith('/api/')) {
+    return next();
+  }
+  
+  // Try express.json() first for well-formed JSON
+  express.json({ limit: '1mb' })(req, res, (err) => {
+    if (err || !req.body) {
+      // If standard JSON parsing fails, fall back to raw parsing
+      console.log('Standard JSON failed, using raw parser...');
+      express.raw({ type: 'application/json', limit: '1mb' })(req, res, next);
+    } else {
+      console.log('Standard JSON parsing successful');
+      next();
+    }
+  });
+});
+
+// Enhanced Make.com JSON repair middleware
 app.use('/api/', (req, res, next) => {
+  // Skip if we already have a parsed body
+  if (req.body && typeof req.body === 'object' && !Buffer.isBuffer(req.body)) {
+    console.log('Body already parsed, skipping repair');
+    return next();
+  }
+  
   if (Buffer.isBuffer(req.body)) {
     const bodyString = req.body.toString('utf8');
+    console.log('Attempting to repair malformed JSON from Make.com...');
     
     try {
-      // Try standard JSON parsing first
-      req.body = JSON.parse(bodyString);
-      console.log('Standard JSON parsing successful');
-    } catch (error) {
-      console.log('Standard JSON parsing failed, attempting repair...');
+      // Enhanced emergency extraction that preserves ALL fields
+      const extractedBody = {};
       
-      try {
-        // Enhanced emergency extraction that preserves context
-        console.log('Attempting emergency extraction with context support...');
-        
-        // Extract code field
-        const codeMatch = bodyString.match(/"code"\s*:\s*"((?:[^"\\]|\\.)*)"/);
-        if (!codeMatch) {
-          throw new Error('Could not find code field in request');
-        }
-        
-        // Extract timeout field (optional)
-        const timeoutMatch = bodyString.match(/"timeout"\s*:\s*(\d+)/);
-        
-        // Extract context field (enhanced robust pattern)
-        let context = {};
-        const contextStart = bodyString.indexOf('"context"');
-        if (contextStart !== -1) {
-          const colonPos = bodyString.indexOf(':', contextStart);
-          if (colonPos !== -1) {
-            // Find the start of the context value (could be { or ")
-            let valueStart = colonPos + 1;
-            while (valueStart < bodyString.length && /\s/.test(bodyString[valueStart])) {
-              valueStart++;
-            }
-            
-            if (valueStart < bodyString.length) {
-              let contextString = '';
+      // Extract code field
+      const codeMatch = bodyString.match(/"code"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      if (codeMatch) {
+        extractedBody.code = codeMatch[1]
+          .replace(/\\"/g, '"')
+          .replace(/\\'/g, "'")
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\t/g, '\t')
+          .replace(/\\\\/g, '\\');
+      }
+      
+      // Extract timeout field
+      const timeoutMatch = bodyString.match(/"timeout"\s*:\s*(\d+)/);
+      extractedBody.timeout = timeoutMatch ? parseInt(timeoutMatch[1]) : 5000;
+      
+      // ENHANCED: Extract context with nested object support
+      let context = {};
+      
+      // Method 1: Try to find complete context object
+      const contextMatch = bodyString.match(/"context"\s*:\s*({[\s\S]*?})(?=\s*[,}])/);
+      if (contextMatch) {
+        try {
+          context = JSON.parse(contextMatch[1]);
+          console.log('Context extracted via method 1:', Object.keys(context));
+        } catch (e) {
+          console.log('Method 1 failed, trying method 2...');
+          
+          // Method 2: Extract input field directly
+          const inputMatch = bodyString.match(/"input"\s*:\s*({[\s\S]*?})(?=\s*[,}])/);
+          if (inputMatch) {
+            try {
+              const inputValue = JSON.parse(inputMatch[1]);
+              context = { input: inputValue };
+              console.log('Input extracted via method 2');
+            } catch (e2) {
+              console.log('Method 2 failed, trying method 3...');
               
-              if (bodyString[valueStart] === '{') {
-                // Context is an object - find matching closing brace
-                let braceCount = 0;
-                let endPos = valueStart;
-                for (let i = valueStart; i < bodyString.length; i++) {
-                  if (bodyString[i] === '{') braceCount++;
-                  if (bodyString[i] === '}') braceCount--;
-                  if (braceCount === 0) {
-                    endPos = i;
-                    break;
-                  }
-                }
-                contextString = bodyString.substring(valueStart, endPos + 1);
-              } else {
-                // Context might be a string or other value - find the end
-                // Look for the closing of the main JSON object
-                const remaining = bodyString.substring(valueStart);
-                const match = remaining.match(/^([^}]*)/);
-                if (match) {
-                  contextString = '{' + match[1].replace(/,$/, '') + '}';
-                }
-              }
-              
-              try {
-                // If contextString looks like it contains an object, try to parse it
-                if (contextString.includes('{') && contextString.includes('}')) {
-                  context = JSON.parse(contextString);
-                  console.log('Context extracted successfully:', Object.keys(context));
-                } else {
-                  // Try to extract input field directly if context parsing fails
-                  const inputMatch = bodyString.match(/"input"\s*:\s*({[^}]*}|\[[^\]]*\]|"[^"]*"|[^,}]+)/);
-                  if (inputMatch) {
+              // Method 3: Try to extract any key-value pairs from context
+              const kvMatches = bodyString.match(/"(\w+)"\s*:\s*([^,}]+)/g);
+              if (kvMatches) {
+                kvMatches.forEach(match => {
+                  const kvMatch = match.match(/"(\w+)"\s*:\s*(.+)/);
+                  if (kvMatch) {
+                    const key = kvMatch[1];
+                    let value = kvMatch[2].trim();
+                    
+                    // Try to parse the value
                     try {
-                      const inputValue = JSON.parse(inputMatch[1]);
-                      context = { input: inputValue };
-                      console.log('Input extracted directly from context');
-                    } catch (inputError) {
-                      console.log('Direct input extraction failed');
-                      context = {};
+                      if (value.startsWith('{')) {
+                        context[key] = JSON.parse(value);
+                      } else if (value.startsWith('"') && value.endsWith('"')) {
+                        context[key] = value.slice(1, -1);
+                      } else if (!isNaN(value)) {
+                        context[key] = parseFloat(value);
+                      } else {
+                        context[key] = value;
+                      }
+                    } catch (e3) {
+                      context[key] = value;
                     }
-                  } else {
-                    console.log('No input field found in context');
-                    context = {};
                   }
-                }
-              } catch (contextError) {
-                console.log('Context parsing failed, attempting input extraction...');
-                
-                // Last resort: try to extract just the input field value
-                const inputMatch = bodyString.match(/"input"\s*:\s*({.*?}(?=\s*[,}]))/);
-                if (inputMatch) {
-                  try {
-                    const inputValue = JSON.parse(inputMatch[1]);
-                    context = { input: inputValue };
-                    console.log('Input field extracted successfully');
-                  } catch (inputError) {
-                    console.log('Input field extraction failed, using empty context');
-                    context = {};
-                  }
-                } else {
-                  console.log('Could not find input field, using empty context');
-                  context = {};
-                }
+                });
+                console.log('Context extracted via method 3:', Object.keys(context));
               }
             }
           }
         }
-        
-        // Unescape the code string
-        let code = codeMatch[1];
-        code = code.replace(/\\"/g, '"')
-                  .replace(/\\'/g, "'")
-                  .replace(/\\n/g, '\n')
-                  .replace(/\\r/g, '\r')
-                  .replace(/\\t/g, '\t')
-                  .replace(/\\\\/g, '\\');
-        
-        req.body = {
-          code: code,
-          timeout: timeoutMatch ? parseInt(timeoutMatch[1]) : 5000,
-          context: context
-        };
-        
-        console.log('Emergency extraction successful');
-        console.log('Code length:', code.length);
-        console.log('Context keys:', Object.keys(context));
-        
-      } catch (extractionError) {
-        console.error('All parsing attempts failed:', extractionError);
-        
-        return res.status(400).json({
-          error: 'Invalid JSON',
-          message: 'Could not parse the request. The JSON structure is malformed.',
-          suggestion: 'Try using the Set Variable module in Make.com to store your code first.',
-          details: extractionError.message,
-          timestamp: new Date().toISOString()
-        });
       }
+      
+      extractedBody.context = context;
+      req.body = extractedBody;
+      
+      console.log('Emergency extraction successful');
+      console.log('Final context keys:', Object.keys(context));
+      
+    } catch (extractionError) {
+      console.error('All parsing attempts failed:', extractionError);
+      return res.status(400).json({
+        error: 'Invalid JSON',
+        message: 'Could not parse the malformed JSON from Make.com',
+        suggestion: 'Use the Set Variable module in Make.com to store complex data',
+        details: extractionError.message,
+        timestamp: new Date().toISOString()
+      });
     }
   }
   
   next();
 });
-
-// Standard JSON parser for other routes
-app.use(express.json({ limit: '1mb' }));
 
 // Rate limiting
 const limiter = rateLimit({
@@ -197,7 +177,7 @@ app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy', 
     timestamp: new Date().toISOString(),
-    version: '1.2.0' // Updated version
+    version: '2.0.0' // Updated version
   });
 });
 
@@ -210,6 +190,7 @@ app.post('/api/execute', authenticateApiKey, async (req, res) => {
     console.log('Code length:', code ? code.length : 0);
     console.log('Timeout:', timeout);
     console.log('Context keys:', Object.keys(context));
+    console.log('Context content:', JSON.stringify(context, null, 2));
     
     if (!code) {
       return res.status(400).json({
