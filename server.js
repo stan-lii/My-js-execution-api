@@ -80,6 +80,9 @@ app.post('/api/execute', authenticateApiKey, async (req, res) => {
       });
     }
     
+    // Clean up line breaks - normalize all line breaks to \n
+    const cleanCode = code.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    
     // Create a secure sandbox
     const vm = new NodeVM({
       console: 'redirect',
@@ -123,7 +126,7 @@ app.post('/api/execute', authenticateApiKey, async (req, res) => {
     
     try {
       // Smart code execution that handles various cases
-      let executableCode = code.trim();
+      let executableCode = cleanCode.trim();
       
       // If it's a simple expression (no semicolons, no statements), wrap it
       if (!executableCode.includes(';') && !executableCode.includes('\n') && 
