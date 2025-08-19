@@ -6,6 +6,9 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Trust proxy for Vercel
+app.set('trust proxy', 1);
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
@@ -107,7 +110,27 @@ app.post('/api/execute', authenticateApiKey, async (req, res) => {
     let result;
     
     try {
-      result = vm.run(code);
+      // If code doesn't have return statement, wrap it to return last expression
+      let executableCode = code.trim();
+      
+      // Check if code already has return statement or is just an expression
+      if (!executableCode.includes('return') && !executableCode.endsWith(';')) {
+        // Simple expression like "2 + 2" - wrap it
+        executableCode = `return (${executableCode});`;
+      } else if (!executableCode.includes('return')) {
+        // Multi-line code without return - try to return last expression
+        const lines = executableCode.split('\n').map(line => line.trim()).filter(line => line);
+        if (lines.length > 0) {
+          const lastLine = lines[lines.length - 1];
+          // If last line doesn't end with semicolon and isn't a statement, treat as expression
+          if (!lastLine.endsWith(';') && !lastLine.match(/^(var|let|const|if|for|while|function|console\.)/)) {
+            lines[lines.length - 1] = `return (${lastLine});`;
+            executableCode = lines.join('\n');
+          }
+        }
+      }
+      
+      result = vm.run(executableCode);
     } catch (vmError) {
       return res.status(400).json({
         error: 'Execution error',
