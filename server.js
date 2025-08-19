@@ -94,38 +94,59 @@ app.post('/api/execute', authenticateApiKey, async (req, res) => {
     let errors = [];
     
     // Capture console output
-    vm.on('console.log', (data) => {
-      output.push({ type: 'log', message: String(data) });
+    vm.on('console.log', (...args) => {
+      const message = args.map(arg => {
+        if (typeof arg === 'object') {
+          try {
+            return JSON.stringify(arg);
+          } catch {
+            return String(arg);
+          }
+        }
+        return String(arg);
+      }).join(' ');
+      output.push({ type: 'log', message });
     });
     
-    vm.on('console.error', (data) => {
-      errors.push({ type: 'error', message: String(data) });
+    vm.on('console.error', (...args) => {
+      const message = args.map(arg => String(arg)).join(' ');
+      errors.push({ type: 'error', message });
     });
     
-    vm.on('console.warn', (data) => {
-      output.push({ type: 'warn', message: String(data) });
+    vm.on('console.warn', (...args) => {
+      const message = args.map(arg => String(arg)).join(' ');
+      output.push({ type: 'warn', message });
     });
     
     const startTime = Date.now();
     let result;
     
     try {
-      // If code doesn't have return statement, wrap it to return last expression
+      // Smart code execution that handles various cases
       let executableCode = code.trim();
       
-      // Check if code already has return statement or is just an expression
-      if (!executableCode.includes('return') && !executableCode.endsWith(';')) {
-        // Simple expression like "2 + 2" - wrap it
+      // If it's a simple expression (no semicolons, no statements), wrap it
+      if (!executableCode.includes(';') && !executableCode.includes('\n') && 
+          !executableCode.match(/^(var|let|const|if|for|while|function|console\.|{)/)) {
         executableCode = `return (${executableCode});`;
-      } else if (!executableCode.includes('return')) {
-        // Multi-line code without return - try to return last expression
+      } else {
+        // For multi-line code, wrap it in an IIFE and return the last expression
         const lines = executableCode.split('\n').map(line => line.trim()).filter(line => line);
         if (lines.length > 0) {
           const lastLine = lines[lines.length - 1];
-          // If last line doesn't end with semicolon and isn't a statement, treat as expression
-          if (!lastLine.endsWith(';') && !lastLine.match(/^(var|let|const|if|for|while|function|console\.)/)) {
+          
+          // If last line is an expression (no semicolon, not a statement), return it
+          if (!lastLine.endsWith(';') && 
+              !lastLine.match(/^(var|let|const|if|for|while|function|console\.|return|{|})/)) {
             lines[lines.length - 1] = `return (${lastLine});`;
             executableCode = lines.join('\n');
+          } else if (!executableCode.includes('return')) {
+            // Wrap everything in an IIFE to capture the result
+            executableCode = `
+              (() => {
+                ${executableCode}
+              })()
+            `;
           }
         }
       }
